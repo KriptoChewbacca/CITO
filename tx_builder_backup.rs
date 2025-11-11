@@ -1,24 +1,5 @@
 //! tx_builder.rs
 //! Production-ready TransactionBuilder for Solana sniper bot (UNIVERSE CLASS GRADE)
-//!
-//! ## Modularization Note
-//! 
-//! This file has been partially modularized. The following components have been extracted
-//! to the `tx_builder/` module directory for better organization:
-//! 
-//! - `tx_builder/config.rs`: Configuration types (TransactionConfig, QuorumConfig, SimulationCacheConfig)
-//! - `tx_builder/errors.rs`: Error types (TransactionBuilderError, UniverseErrorType, DexProgram)
-//! - `tx_builder/rate_limit.rs`: Rate limiting (TokenBucket, CircuitBreaker, RetryPolicy)
-//! - `tx_builder/types.rs`: Core types (TxBuildOutput, ExecutionContext, etc.)
-//! - `tx_builder/mod.rs`: Module entry point with re-exports
-//! 
-//! The modularized code in `tx_builder/` can be used via:
-//! ```rust
-//! use tx_builder::{TransactionConfig, TransactionBuilderError, TxBuildOutput};
-//! ```
-//! 
-//! This file currently contains the full implementation for backward compatibility.
-//! Future work will complete the migration to use the modularized code exclusively.
 //! 
 //! ## Enhanced Features (Universe Class)
 //! 
@@ -238,12 +219,135 @@ use spl_associated_token_account::get_associated_token_address;
 use spl_token::id as token_program_id;
 use spl_token::instruction::close_account;
 
-// NOTE: Modularized code is available in tx_builder/ directory
-// This file contains the complete implementation for now
-// Future: migrate to use modularized code from tx_builder/
+// ============================================================================
+// Transaction Build Output (Phase 1: RAII Nonce Management)
+// ============================================================================
+
+/// Output from transaction building with nonce lease management (RAII pattern)
+/// 
+/// This struct ensures proper lifecycle management of nonce leases through RAII:
+/// - Holds the built transaction ready for signing/broadcast
+/// - Maintains ownership of the nonce lease until explicitly released or dropped
+/// - Automatically warns if lease is not properly released before drop
+/// - Extracts required signers from transaction header for validation
+/// 
+/// # RAII Contract
+/// 
+/// This struct enforces the following RAII guarantees:
+/// 
+/// 1. **Owned Data**: All fields contain owned data ('static), no references
+/// 2. **Automatic Cleanup**: `Drop` implementation ensures nonce lease is released
+/// 3. **Explicit Release**: Prefer `release_nonce()` for controlled cleanup
+/// 4. **Consume Pattern**: `release_nonce()` consumes `self` to prevent use-after-release
+/// 5. **No Async in Drop**: Drop only logs; actual release is synchronous
+/// 6. **Zero Leaks**: Lease is guaranteed to be released either explicitly or on drop
+/// 
+/// # Example Usage
+/// ```no_run
+/// let output = builder.build_buy_transaction_output(&candidate, &config, false, true).await?;
+/// 
+/// // Hold nonce guard during broadcast
+/// let result = rpc.send_transaction(output.tx.clone()).await;
+/// 
+/// match result {
+///     Ok(sig) => {
+///         // Success - explicitly release nonce
+///         output.release_nonce().await?;
+///         Ok(sig)
+///     }
+///     Err(e) => {
+///         // Error - drop output (auto-releases nonce)
+///         drop(output);
+///         Err(e)
+///     }
+/// }
+/// ```
+pub struct TxBuildOutput {
+    /// The built transaction ready for signing/broadcast
+    pub tx: VersionedTransaction,
+    
+    /// Optional nonce lease guard (held until broadcast completes)
+    /// Automatically released on drop via RAII pattern
+    /// 
+    /// This field is owned data, not a reference. The lease will be automatically
+    /// released when this struct is dropped, preventing resource leaks.
+    pub nonce_guard: Option<crate::nonce_manager::NonceLease>,
+    
+    /// List of required signers for this transaction
+    /// Extracted from message.header.num_required_signatures
+    pub required_signers: Vec<Pubkey>,
+}
+
+impl TxBuildOutput {
+    /// Create new TxBuildOutput with nonce guard
+    /// 
+    /// Automatically extracts required signers from the transaction header
+    /// based on num_required_signatures field using the compat layer.
+    pub fn new(
+        tx: VersionedTransaction,
+        nonce_guard: Option<crate::nonce_manager::NonceLease>,
+    ) -> Self {
+        // Extract required signers using compat layer for unified API
+        let required_signers = crate::compat::get_required_signers(&tx.message)
+            .to_vec();
+        
+        Self {
+            tx,
+            nonce_guard,
+            required_signers,
+        }
+    }
+    
+    /// Explicitly release nonce guard (if held)
+    /// 
+    /// This method should be called after successful transaction broadcast.
+    /// Returns an error if the nonce release fails.
+    /// 
+    /// # RAII Contract
+    /// 
+    /// This method enforces RAII by:
+    /// - Consuming `self` to prevent use-after-release
+    /// - Idempotent: safe to call even if no nonce guard is held
+    /// - Explicit cleanup: allows handling release errors
+    /// 
+    /// # Example
+    /// 
+    /// ```no_run
+    /// let output = builder.build_buy_transaction_output(...).await?;
+    /// let sig = rpc.send_transaction(output.tx.clone()).await?;
+    /// 
+    /// // Explicitly release after successful broadcast
+    /// output.release_nonce().await?;
+    /// ```
+    pub async fn release_nonce(mut self) -> Result<(), TransactionBuilderError> {
+        if let Some(guard) = self.nonce_guard.take() {
+            guard.release().await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TxBuildOutput {
+    /// RAII cleanup: Warn if nonce guard is being dropped without explicit release
+    /// 
+    /// This implementation:
+    /// - Does NOT perform async operations (RAII contract requirement)
+    /// - Only logs a warning for diagnostic purposes
+    /// - Relies on NonceLease's Drop for actual cleanup
+    /// - Prevents resource leaks through automatic cleanup chain
+    fn drop(&mut self) {
+        if let Some(ref guard) = self.nonce_guard {
+            warn!(
+                nonce = %guard.nonce_pubkey(),
+                drop_source = "TxBuildOutput",
+                "TxBuildOutput dropped with active nonce guard - lease will be auto-released via NonceLease Drop"
+            );
+        }
+    }
+}
 
 // ============================================================================
-// Rate Limiting & Backpressure (now in tx_builder/rate_limit.rs)
+// Rate Limiting & Backpressure
 // ============================================================================
 
 /// Token bucket rate limiter for RPC calls, simulations, and HTTP requests
