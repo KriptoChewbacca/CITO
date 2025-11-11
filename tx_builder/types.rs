@@ -88,10 +88,10 @@ impl Drop for TxBuildOutput {
 
 /// Simulation cache entry with TTL
 #[derive(Debug, Clone)]
-pub(crate) struct SimulationCacheEntry {
-    pub(crate) compute_units: u64,
-    pub(crate) cached_at: Instant,
-    pub(crate) slot: u64,
+pub struct SimulationCacheEntry {
+    pub compute_units: u64,
+    pub cached_at: Instant,
+    pub slot: u64,
 }
 
 /// Metadata for tracking program information (Universe Class)
@@ -156,13 +156,13 @@ impl SlippagePredictor {
 }
 
 /// Execution context holding blockhash and optional nonce lease
-pub(crate) struct ExecutionContext {
-    pub(crate) blockhash: Hash,
-    pub(crate) nonce_pubkey: Option<Pubkey>,
-    pub(crate) nonce_authority: Option<Pubkey>,
-    pub(crate) nonce_lease: Option<NonceLease>,
+pub struct ExecutionContext {
+    pub blockhash: Hash,
+    pub nonce_pubkey: Option<Pubkey>,
+    pub nonce_authority: Option<Pubkey>,
+    pub nonce_lease: Option<NonceLease>,
     #[cfg(feature = "zk_enabled")]
-    pub(crate) zk_proof: Option<crate::nonce_manager::ZkProofData>,
+    pub zk_proof: Option<crate::nonce_manager::ZkProofData>,
 }
 
 impl std::fmt::Debug for ExecutionContext {
